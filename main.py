@@ -5,6 +5,7 @@ from pydantic import BaseModel, EmailStr, Field
 from typing import Optional
 from passlib.context import CryptContext
 from database import db, create_document, get_documents
+import requests
 
 app = FastAPI()
 
@@ -28,6 +29,10 @@ class RegisterRequest(BaseModel):
 class LoginRequest(BaseModel):
     email: EmailStr
     password: str = Field(..., min_length=6, max_length=128)
+
+
+class GoogleAuthRequest(BaseModel):
+    id_token: str = Field(..., description="Google ID Token from GIS")
 
 
 @app.get("/")
@@ -116,6 +121,51 @@ def login(payload: LoginRequest):
         },
         "token": "demo-token",
     }
+
+
+@app.post("/auth/google")
+def google_auth(payload: GoogleAuthRequest):
+    """Verify Google ID token and sign-in/up the user.
+    Expects an ID token from Google Identity Services (client-side).
+    """
+    try:
+        verify_url = "https://oauth2.googleapis.com/tokeninfo"
+        resp = requests.get(verify_url, params={"id_token": payload.id_token}, timeout=10)
+        if resp.status_code != 200:
+            raise HTTPException(status_code=401, detail="Token Google tidak valid")
+        info = resp.json()
+        email = (info.get("email") or "").lower()
+        if not email:
+            raise HTTPException(status_code=400, detail="Email tidak ditemukan dari Google")
+        name = info.get("name") or f"Pengguna {email.split('@')[0]}"
+
+        # Find or create user
+        user = db["authuser"].find_one({"email": email}) if db else None
+        if not user:
+            from schemas import AuthUser
+            # Store a placeholder password hash for social account
+            placeholder_hash = pwd_context.hash(os.urandom(16).hex())
+            doc = AuthUser(name=name, email=email, password_hash=placeholder_hash, is_active=True)
+            inserted_id = create_document("authuser", doc)
+            user = db["authuser"].find_one({"_id": inserted_id}) if db else {"_id": inserted_id, "name": name, "email": email}
+
+        if not user.get("is_active", True):
+            raise HTTPException(status_code=403, detail="Akun dinonaktifkan")
+
+        return {
+            "ok": True,
+            "message": "Login Google berhasil",
+            "user": {
+                "id": str(user.get("_id")),
+                "name": user.get("name"),
+                "email": user.get("email"),
+            },
+            "token": "demo-token",
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail="Gagal memproses login Google")
 
 
 if __name__ == "__main__":
