@@ -1,4 +1,6 @@
 import os
+import secrets
+from datetime import datetime, timedelta, timezone
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, EmailStr, Field
@@ -33,6 +35,16 @@ class LoginRequest(BaseModel):
 
 class GoogleAuthRequest(BaseModel):
     id_token: str = Field(..., description="Google ID Token from GIS")
+
+
+class ForgotPasswordRequest(BaseModel):
+    email: EmailStr
+
+
+class ResetPasswordRequest(BaseModel):
+    email: EmailStr
+    token: str = Field(..., min_length=10)
+    new_password: str = Field(..., min_length=6, max_length=128)
 
 
 @app.get("/")
@@ -164,8 +176,66 @@ def google_auth(payload: GoogleAuthRequest):
         }
     except HTTPException:
         raise
-    except Exception as e:
+    except Exception:
         raise HTTPException(status_code=500, detail="Gagal memproses login Google")
+
+
+@app.post("/auth/forgot")
+def forgot_password(payload: ForgotPasswordRequest):
+    # Always respond ok to avoid account enumeration, but generate a token if user exists
+    email = payload.email.lower()
+    user = db["authuser"].find_one({"email": email}) if db else None
+
+    if user and db is not None:
+        # Invalidate previous tokens
+        db["passwordreset"].update_many({"email": email, "used": False}, {"$set": {"used": True}})
+        from schemas import PasswordReset
+        token = secrets.token_urlsafe(32)
+        expires_at = datetime.now(timezone.utc) + timedelta(hours=1)
+        doc = PasswordReset(email=email, token=token, expires_at=expires_at, used=False)
+        create_document("passwordreset", doc)
+        # In real app we would send email here. For demo we return the token so it can be used directly.
+        return {"ok": True, "message": "Jika email terdaftar, tautan reset telah dikirim.", "token": token, "expires_in": 3600}
+
+    # If no user, still return ok without token
+    return {"ok": True, "message": "Jika email terdaftar, tautan reset telah dikirim."}
+
+
+@app.post("/auth/reset")
+def reset_password(payload: ResetPasswordRequest):
+    email = payload.email.lower()
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database tidak tersedia")
+
+    token_doc = db["passwordreset"].find_one({"email": email, "token": payload.token})
+    if not token_doc:
+        raise HTTPException(status_code=400, detail="Token reset tidak valid")
+
+    if token_doc.get("used", False):
+        raise HTTPException(status_code=400, detail="Token reset sudah digunakan")
+
+    expires_at = token_doc.get("expires_at")
+    # expires_at may be datetime or string depending on driver settings; attempt parse/compare
+    now = datetime.now(timezone.utc)
+    if isinstance(expires_at, str):
+        try:
+            expires_at = datetime.fromisoformat(expires_at)
+        except Exception:
+            pass
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    if now > expires_at:
+        raise HTTPException(status_code=400, detail="Token reset telah kedaluwarsa")
+
+    user = db["authuser"].find_one({"email": email})
+    if not user:
+        raise HTTPException(status_code=404, detail="Pengguna tidak ditemukan")
+
+    new_hash = pwd_context.hash(payload.new_password)
+    db["authuser"].update_one({"_id": user["_id"]}, {"$set": {"password_hash": new_hash}})
+    db["passwordreset"].update_one({"_id": token_doc["_id"]}, {"$set": {"used": True}})
+
+    return {"ok": True, "message": "Password berhasil direset. Silakan login kembali."}
 
 
 if __name__ == "__main__":

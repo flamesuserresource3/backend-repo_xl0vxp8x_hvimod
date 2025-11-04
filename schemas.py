@@ -13,6 +13,7 @@ Model name is converted to lowercase for the collection name:
 
 from pydantic import BaseModel, Field, EmailStr
 from typing import Optional
+from datetime import datetime
 
 # Example schemas (kept for reference):
 
@@ -50,3 +51,13 @@ class AuthUser(BaseModel):
     email: EmailStr = Field(..., description="Email address (unique)")
     password_hash: str = Field(..., description="BCrypt password hash")
     is_active: bool = Field(True, description="Whether user is active")
+
+class PasswordReset(BaseModel):
+    """
+    Password reset requests
+    Collection name: "passwordreset"
+    """
+    email: EmailStr = Field(..., description="Associated account email")
+    token: str = Field(..., description="One-time secure token")
+    expires_at: datetime = Field(..., description="Expiration timestamp (UTC)")
+    used: bool = Field(False, description="Whether token has been used")
